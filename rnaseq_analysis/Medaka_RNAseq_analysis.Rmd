@@ -1,0 +1,1649 @@
+---
+title: "Medaka_RNA_seq_analysis"
+output:
+  html_document: default
+  pdf_document: default
+date: "2026-06-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!requireNamespace("tidyverse", quietly = TRUE)){install.packages("tidyverse")}
+if(!requireNamespace("stringr", quietly = TRUE)){install.packages("stringr")}
+if(!requireNamespace("gplots", quietly = TRUE)){install.packages("gplots")}
+if(!requireNamespace("matrixStats", quietly = TRUE)){install.packages("matrixStats")}
+if(!requireNamespace("extrafont", quietly = TRUE)){install.packages("extrafont")}
+if(!requireNamespace("ggpubr", quietly = TRUE)){install.packages("ggpubr")}
+if(!requireNamespace("gt", quietly = TRUE)){install.packages("gt")}
+if (!requireNamespace("readxl", quietly = TRUE)) {install.packages("readxl")}
+if (!requireNamespace("curl", quietly = TRUE)) {install.packages("curl")}
+if (!requireNamespace("ggVennDiagram", quietly = TRUE)) { install.packages("ggVennDiagram") }
+if (!require("pbapply")) install.packages('pbapply')
+library(reticulate)
+library(pbapply)
+library(tidyverse)
+library(stringr)
+library(gplots)
+library(matrixStats)
+library(extrafont)
+library(ggpubr)
+library(gt)
+theme_set(theme_classic(base_size = 6, base_family = "Arial"))
+font_import(pattern = "Arial")
+loadfonts(device = "all")
+```
+
+# Comparison of outdoor transcriptome and signal importance.
+
+### Loading outdoor RNA-seq data
+
+```{r Loading}
+
+#Construct data set
+maindir = "../data/RNAseq_nakayama_2015to17"
+
+# Data file lists in Nakayama et al 2023
+rep1_file_list <- list.files(file.path(maindir,"group1"))[-1] # Exclude 150929 data 
+rep2_file_list <- list.files(file.path(maindir,"group2"))[-1] # Exclude 150929 data 
+gene_profiles <- read.csv(file.path(maindir, "group1", rep1_file_list[1])) %>% dplyr::select(-expected_count, -FPKM)
+
+# Construct count matrix from data file
+Create_time_corse_rna_seq_df <- function(group, fpkm_file_list){
+  for( filename in fpkm_file_list){
+    extracted_txt = str_extract(filename, "\\d{6}")
+    date = as.Date(extracted_txt, format = "%y%m%d")
+    formatted_date <- format(date, "%y-%m/%d")
+    if(filename ==  fpkm_file_list[1]){
+      RNAseq_time_series_df <- read.csv(file.path(maindir, group, filename)) %>% dplyr::select(gene_id, Symbol, FPKM) 
+    }else{
+      data <- read.csv(file.path(maindir, group, filename)) %>% dplyr::select(gene_id, FPKM)
+      RNAseq_time_series_df <- right_join(RNAseq_time_series_df, data, by="gene_id")
+    }
+    colnames(RNAseq_time_series_df)[colnames(RNAseq_time_series_df) == "FPKM"] <- formatted_date
+  }
+  return(RNAseq_time_series_df)
+}
+
+rep1_RNAseq_time_series_df = Create_time_corse_rna_seq_df("group1", rep1_file_list)
+rep2_RNAseq_time_series_df = Create_time_corse_rna_seq_df("group2", rep2_file_list)
+symbol_to_geneid <- rep1_RNAseq_time_series_df %>% dplyr::select(gene_id, Symbol)
+
+#Dimension is different due to quality control. Taking average in the shared genes.
+shared_genes <- intersect(rep1_RNAseq_time_series_df$gene_id, rep2_RNAseq_time_series_df$gene_id) 
+rep1_matrix <- rep1_RNAseq_time_series_df %>% arrange(gene_id) %>% column_to_rownames("gene_id") %>% dplyr::select(-Symbol)
+rep2_matrix <- rep2_RNAseq_time_series_df %>% arrange(gene_id) %>% column_to_rownames("gene_id") %>% dplyr::select(-Symbol)
+
+rep1_shared_gene_matrix <- rep1_RNAseq_time_series_df %>% filter(is.element(gene_id, shared_genes)) %>% arrange(gene_id) %>% column_to_rownames("gene_id") %>% dplyr::select(-Symbol)
+rep2_shared_gene_matrix <- rep2_RNAseq_time_series_df %>% filter(is.element(gene_id, shared_genes)) %>% arrange(gene_id) %>% column_to_rownames("gene_id") %>% dplyr::select(-Symbol)
+is.order.same <-  all(rownames(rep1_shared_gene_matrix)==rownames(rep2_shared_gene_matrix))
+if(is.order.same == TRUE){
+  ave_expression_matrix_raw <- (rep1_shared_gene_matrix　+ rep2_shared_gene_matrix)/2
+}else{
+  print("Value Err!")
+}
+
+#Exclude na containing gene.
+medaka_2y_RNAseq_ave <- ave_expression_matrix_raw[complete.cases(ave_expression_matrix_raw),]
+medaka_2y_RNAseq_s1 <- rep1_matrix[complete.cases(rep1_matrix),]
+medaka_2y_RNAseq_s2 <- rep2_matrix[complete.cases(rep2_matrix),]
+
+# Note: Average expression matrix losts NA information
+print(dim(medaka_2y_RNAseq_s1))
+print(dim(medaka_2y_RNAseq_s2))
+print(dim(medaka_2y_RNAseq_ave))
+
+# Normalize data
+medaka_2y_RNAseq_ave_norm <- scale(t(medaka_2y_RNAseq_ave)) %>% t()
+print(medaka_2y_RNAseq_ave_norm[1:5,1:5])
+```
+
+### Loading Signal Importance.
+
+Load signal importance generated in `InverseSignalImportance_share.ipynb`. See method for detail estimation process. Convert twice per month data into once per month to align with the RNA-seq data.
+
+```{r LoadSignalImportance_room}
+
+path　= "../results/SignalImportance_average.csv"
+
+
+signal_importance_ <- read.csv(path, row.names = 1)
+
+#Align the sample date
+sample_point <- format(as.Date(signal_importance_$Time_raw, format = "%Y-%m-%d %H:%M:%S"), "%y-%m/%d")
+signal_importance <- signal_importance_[is.element(sample_point, colnames(medaka_2y_RNAseq_ave)),]
+head(signal_importance)
+```
+
+### Comparison of RNA-seq and Signal importance.
+
+Compare the gene you are interested in and signal importance.
+
+```{r ComparisonRNAseqSignalImportance}
+
+comp_plot <- function(symbol, factor){
+  factor_color <- c(SR = "red", WT = "blue", DL = "orange", GSI = "#008000")
+  geneid = filter(symbol_to_geneid, Symbol == symbol)$gene_id
+  if(length(geneid) == 0){
+    geneid = symbol
+  }
+  comp_df <- data.frame(sample_point = c(1:24),
+                        gene = scale(as.numeric(medaka_2y_RNAseq_ave_norm[geneid,])),
+                        sig_imp = scale(as.numeric(signal_importance[[factor]])))
+  g <- 
+    ggplot(comp_df) +
+    geom_line(aes(x = sample_point, y = gene, color = "Expression"), 
+              alpha = 0.6, size = 1) + 
+    geom_point(aes(x = sample_point, y = gene, color = "Expression"), 
+               alpha = 0.6, size = 1) + 
+    geom_line(aes(x = sample_point, y = sig_imp, color = "Signal Importance"), 
+              alpha = 0.6, size = 1) +
+    geom_point(aes(x = sample_point, y = sig_imp, color = "Signal Importance"), 
+               alpha = 0.6, size = 1) +
+    labs(x = "Sample Date", y = "Value", title = "") +
+    scale_color_manual(
+        name = "",
+        values = c("Expression" = "black", "Signal Importance" = factor_color[[factor]]),  
+        labels = c("Expression" = symbol, "Signal Importance" = "W_WT") 
+    ) +
+    scale_x_continuous(
+      breaks = seq(1, 26, by = 2),  # ラベルを設定する位置
+      labels = c("10", "12", "02", "04", "06", "08", "10", "12", "02", "04", "06", "08", "10")
+    ) + 
+    ylab("Normalize") + xlab("Time (month)") + 
+    theme(
+      legend.direction = "vertical",
+      legend.position = "inside", legend.position.inside =  c(.01, .95),
+      legend.justification = "left",
+      legend.background = element_blank(), 
+      legend.text = element_text(size = 12)
+    )
+  return(g)
+}
+
+#g1 <- comp_plot("drg1", "SR")
+#g2 <- comp_plot("LOC101160627", "WT")
+#g3 <- comp_plot("LOC110013827", "GSI")
+#gblock <- gridExtra::grid.arrange(g1,g2,g3, nrow = 1,ncol=3)
+
+g1 <- comp_plot("LOC101160627", "WT")
+g2 <- comp_plot("LOC101162833", "WT")
+g3 <- comp_plot("BGI_novel_G000005", "WT")
+g4 <- comp_plot("BGI_novel_G000075", "WT")
+
+gblock <- gridExtra::grid.arrange(g1,g2,g3,g4,nrow = 2,ncol=2)
+#ggplot2::ggsave('MedakaPosterFig.pdf',gblock, 
+#               width=9, height =18, units = "cm", dpi=200)
+
+```
+
+# Statistical test
+
+### Loading randomized signal importance.
+
+Load surrogated signal importance generated in `RandomizeSignalImportance.ipynb`.
+
+```{r LoadRandomizedWaveform}
+
+data_dir = "../results"
+SRimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_SRimp.csv", sep="")), header=FALSE)
+WTimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_WTimp.csv", sep="")), header=FALSE)
+DLimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_DLimp.csv", sep="")), header=FALSE)
+GSIimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_GSIimp.csv", sep="")), header=FALSE)
+
+
+#Align the sample date
+sample_point <- format(as.Date(signal_importance_$Time_raw, format = "%Y-%m-%d %H:%M:%S"), "%y-%m/%d")
+
+SRimp.randomized.coef <- SRimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+WTimp.randomized.coef <- WTimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+DLimp.randomized.coef <- DLimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+GSIimp.randomized.coef <- GSIimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+
+
+
+#Comparison with gene expression SuppFig5 e
+df <- data.frame(
+  X = c(1:24), 
+  factor = as.numeric(medaka_2y_RNAseq_ave_norm['101160627',]),
+  Xcoef = scale(as.numeric(signal_importance[["WT"]])),
+  Xcoef1 = scale(as.numeric(WTimp.randomized.coef[75290,])),
+  Xcoef2 = scale(as.numeric(WTimp.randomized.coef[22661,])),
+  Xcoef3 = scale(as.numeric(WTimp.randomized.coef[18446,]))
+) %>% 
+  pivot_longer(-X, names_to = "key", values_to = "value")
+
+color_map <- c("factor" = "black", "Xcoef" = "blue", "Xcoef1" = "coral", 
+               "Xcoef2" = "#008080", "Xcoef3" = "goldenrod")
+label_map <- c("factor" = '101160627', "Xcoef" = "W_WT", "Xcoef1" = 'surrogate #75289', 
+               "Xcoef2" = 'surrogate #22660', "Xcoef3" = 'surrogate #18445')
+
+ggplot(df, aes(x = X, y = value, color = key)) +  
+  geom_line() +
+  scale_color_manual(name = "", values = color_map, labels = label_map) +
+  scale_x_continuous(breaks = seq(1, 26, by = 2), 
+                     labels =c("10","12","02","04","06","08","10","12","02","04","06","08","10")) +
+  theme_classic(base_size = 12) + 
+  labs(y = "FPKM · Weight", x = "Time (month)") +
+  theme(legend.position = "top", legend.text = element_text(size = 12))
+
+
+```
+
+### Randomization test.
+
+In statistical test, we only focus on the highly correlate genes (r \> 0.6).
+
+#### Surrogate method explaining
+
+```{r nullmodeltest}
+
+nullmodel.ccf <- cor(t(WTimp.randomized.coef), as.numeric(medaka_2y_RNAseq_ave_norm['101160627', ]))
+realdata.ccf <- cor(as.numeric(signal_importance[["WT"]]),as.numeric(medaka_2y_RNAseq_ave_norm['101160627',]))
+g_mat <-
+  ggplot(data.frame(x = nullmodel.ccf), aes(x = x)) +
+  geom_histogram(aes(y = ..density..), fill = "gray", color = "grey", alpha = 0.8) +
+  geom_density(color = "black", linewidth = 1) +
+  geom_vline(xintercept = 0.8, color = "red", linetype = "dashed", linewidth = 1) +
+  theme_classic(base_size = 12) +
+  ggtitle('101160627') +
+  labs(x = "Correlation coefficient", y = "Density")
+
+dens <- density(nullmodel.ccf)
+
+data_point = which(dens$x < realdata.ccf)
+bin_width = diff(dens$x)[1]
+if(realdata.ccf > 0){
+  p_val <- 1- sum(dens$y[data_point])*bin_width
+}else{
+  p_val <- sum(dens$y[data_point])*bin_width
+}
+print(p_val)
+g_mat
+```
+
+#### Quantify correlation coefficients for signal importance and each gene.
+
+```{r DefinePermutationTestFinc}
+
+## Filtering sample 
+
+SRimp_ccr <- apply(medaka_2y_RNAseq_ave_norm, 1, y = signal_importance[['SR']], FUN=cor) %>% sort(decreasing = T)　
+WTimp_ccr <- apply(medaka_2y_RNAseq_ave_norm, 1, y = signal_importance[['WT']], FUN=cor) %>% sort(decreasing = T)
+DLimp_ccr <- apply(medaka_2y_RNAseq_ave_norm, 1, y = signal_importance[['DL']], FUN=cor) %>% sort(decreasing = T)
+GSIimp_ccr <- apply(medaka_2y_RNAseq_ave_norm, 1, y = signal_importance[['GSI']], FUN=cor) %>% sort(decreasing = T)
+#SRimp.vs.sexgene = sapply(rownames(sex_hormone_genes), nullmodeldf=SRimp.randomized.coef, realmodeldf=signal_importance[['SR']], FUN = surrogate_test) %>% t()
+
+SRtmp = SRimp_ccr %>% as.data.frame()
+colnames(SRtmp) = "cor"
+WTtmp = WTimp_ccr %>% as.data.frame()
+colnames(WTtmp) = "cor"
+DLtmp = DLimp_ccr %>% as.data.frame()
+colnames(DLtmp) = "cor"
+GSItmp = GSIimp_ccr %>% as.data.frame()
+colnames(GSItmp) = "cor"
+
+histSR <- SRtmp %>%   ggplot(aes(x=cor)) + geom_histogram(colour="black", fill="grey", linewidth=0.1) + xlim(-1,1) + ggtitle(bquote(w[.("SR")])) + xlab("Correlation coefficient")
+
+histWT <-WTtmp %>% ggplot(aes(x=cor)) + geom_histogram(colour="black", fill="grey", linewidth=0.1) + xlim(-1,1) + ggtitle(bquote(w[.("WT")])) + xlab("Correlation coefficient")
+
+histDL <-DLtmp %>% ggplot(aes(x=cor)) + geom_histogram(colour="black", fill="grey", linewidth=0.1) + xlim(-1,1) + ggtitle(bquote(w[.("DL")])) + xlab("Correlation coefficient")
+
+histGSI <-GSItmp %>% ggplot(aes(x=cor)) + geom_histogram(colour="black", fill="grey", linewidth=0.1) + xlim(-1,1) + ggtitle(bquote(w[.("GSI")])) + xlab("Correlation coefficient")
+
+histgblock <- gridExtra::grid.arrange(histSR,histWT,histGSI, nrow=3)
+```
+
+```{r correlation_plot}
+
+comp_plot <- function(geneid, factor){
+  
+  factor_color <- c(SR = "red", WT = "blue", DL = "orange", GSI = "#008000")
+  symbol = filter(symbol_to_geneid, gene_id==geneid)$Symbol
+  if(is.na(symbol)){
+    symbol = geneid
+  }
+  comp_df <- data.frame(sample_point = c(1:24),
+                        gene = scale(as.numeric(medaka_2y_RNAseq_ave_norm[geneid,])),
+                        sig_imp = scale(as.numeric(signal_importance[[factor]])))
+  g <- 
+    ggplot(comp_df) +
+    geom_line(aes(x = sample_point, y = gene, color = "Expression"), 
+              alpha = 0.6, size = 0.5) + 
+    geom_point(aes(x = sample_point, y = gene, color = "Expression"), 
+               alpha = 0.6, size = 0.5) + 
+    geom_line(aes(x = sample_point, y = sig_imp, color = "Signal Importance"), 
+              alpha = 0.6, size = 0.5) +
+    geom_point(aes(x = sample_point, y = sig_imp, color = "Signal Importance"), 
+               alpha = 0.6, size = 0.5) +
+    labs(x = "Sample Date", y = "Value", title = "") +
+    scale_color_manual(
+        name = "",
+        values = c("Expression" = "black", "Signal Importance" = factor_color[[factor]]),  
+        breaks="Expression",
+        labels=symbol
+    ) +
+    scale_x_continuous(
+      breaks = seq(1, 26, by = 4),  # ラベルを設定する位置
+      labels = c("10", "02", "06", "10", "02", "06", "10")
+    ) + 
+    ylab("Normalize") + xlab("Time (month)") + 
+    theme(
+      legend.direction = "vertical",
+      legend.position = "inside", legend.position.inside =  c(.01, .95),
+      legend.justification = "left",
+      legend.background = element_blank(), 
+      legend.text = element_text(size = 6)
+    )
+  return(g)
+}
+
+gSR <- gridExtra::grid.arrange(
+  grobs = lapply(names(SRimp_ccr[1:3]), comp_plot, "SR"),
+  ncol = 3
+)
+interest <- c("BGI_novel_G000005", "BGI_novel_G000075", "101159287")
+gWT <- gridExtra::grid.arrange(
+  grobs = lapply(interest, comp_plot, "WT"),
+  ncol = 3
+)
+gDL <- gridExtra::grid.arrange(
+  grobs = lapply(names(DLimp_ccr[1:3]), comp_plot, "DL"),
+  ncol = 3
+)
+gGSI <- gridExtra::grid.arrange(
+  grobs = lapply(names(GSIimp_ccr[1:3]), comp_plot, "GSI"),
+  ncol = 3
+)
+
+compgblock <- gridExtra::grid.arrange(gSR,gWT,gGSI, nrow=3)
+
+library(grid)   
+Fig3abplot <- gridExtra::grid.arrange(compgblock, histgblock, ncol=2, widths=c(3,0.8))
+
+#ggplot2::ggsave('FiguresV2/plot3ab.pdf',Fig3abplot, 
+#               width=7.13, height =3.47, units = "in")
+
+
+```
+
+#### Calculate p-value based on surrogate test
+
+```{r PermutationTest}
+
+# Filtering interest gene name sets
+SRimp_highcc_geneids <- names(SRimp_ccr[SRimp_ccr > 0.6])
+WTimp_highcc_geneids <- names(WTimp_ccr[WTimp_ccr > 0.6])
+DLimp_highcc_geneids <- names(DLimp_ccr[DLimp_ccr > 0.6])
+GSIimp_highcc_geneids <- names(GSIimp_ccr[GSIimp_ccr > 0.6])
+
+
+library(matrixStats)
+library(future.apply)
+library(progressr)   # ← 進捗表示
+
+surrogate_test <- function(genename,
+                           nullmodel_mat,   # 行 = サロゲート (N=1e4), 列 = 時点
+                           realmodel_vec) { # 長さ T
+  ## 1. 実データ相関
+  g     <- as.numeric(medaka_2y_RNAseq_ave_norm[genename, ])
+  realr <- cor(realmodel_vec, g)
+  ## 2. サロゲートとの相関を一括計算
+  null_r <- cor(t(nullmodel_mat), g)
+
+  #公式（Davison & Hinkley, 1997）：p = (k+1)/(N+1)
+  # calculate p-value from the emperical distribution.
+  N    <- length(null_r)
+  k_hi <- sum(null_r >=  realr)
+  k_lo <- sum(null_r <=  realr)
+  pval <- if (realr >= 0) (k_hi + 1) / (N + 1)
+           else            (k_lo + 1) / (N + 1)
+  return(c(cor = realr, p_val = pval))
+}
+
+
+# fast mode sapply
+options(mc.cores = parallel::detectCores())
+
+SRimp_hc_statres <- pbapply::pbsapply(
+  SRimp_highcc_geneids,
+  surrogate_test,
+  nullmodel_mat = SRimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['SR']])
+)  %>% t() %>% as.data.frame()
+colnames(SRimp_hc_statres) <- c("cor", "raw_pval")
+
+WTimp_hc_statres <- pbapply::pbsapply(
+  WTimp_highcc_geneids,
+  #rownames(medaka_2y_RNAseq_ave),
+  surrogate_test,
+  nullmodel_mat = WTimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['WT']])
+) %>% t() %>% as.data.frame()
+colnames(WTimp_hc_statres) <- c("cor", "raw_pval")
+
+DLimp_hc_statres <- pbapply::pbsapply(
+  DLimp_highcc_geneids,
+  surrogate_test,
+  nullmodel_mat = DLimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['DL']])
+) %>% t() %>% as.data.frame()
+colnames(DLimp_hc_statres) <- c("cor", "raw_pval")
+
+GSIimp_hc_statres <- pbapply::pbsapply(
+  GSIimp_highcc_geneids,
+  surrogate_test,
+  nullmodel_mat = GSIimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['GSI']])
+) %>% t() %>% as.data.frame()
+colnames(GSIimp_hc_statres) <- c("cor", "raw_pval")
+
+```
+
+#### Extract significantly correlate genes
+
+```{r signif_gene}
+# Multiple correction.
+SRimp_hc_statres_corrected <- SRimp_hc_statres %>% 
+  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni"))
+
+WTimp_hc_statres_corrected <- WTimp_hc_statres %>% 
+  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni"))
+
+DLimp_hc_statres_corrected <- DLimp_hc_statres %>% 
+  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni"))
+
+GSIimp_hc_statres_corrected <-GSIimp_hc_statres %>%
+  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni"))
+
+# Filter with p < 0.05 (bonferroni)
+SRimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% print() 
+WTimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% print() # 4 genes
+DLimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% print() # 0.05: 5 genes, 0.01: 2 genes
+GSIimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% print() # 0 genes
+
+# Extract significant correlated genes
+WTimp_signif_geneids <- WTimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% rownames() %>% sort()
+SRimp_signif_geneids <- SRimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% rownames() 
+DLimp_signif_geneids <- DLimp_hc_statres_corrected %>% filter(bonfp < 0.05) %>% rownames() 
+# show detail
+gene_profiles %>% filter(is.element(gene_id, WTimp_signif_geneids)) %>% 
+  mutate(name = ifelse(is.na(Symbol), gene_id, Symbol)) %>% 
+  dplyr::select(name) %>% gt()
+```
+
+```{r create_suptable_1}
+
+if(!requireNamespace("writexl", quietly = TRUE)){install.packages("writexl")}
+library(writexl)
+
+SR_save_format <- SRimp_hc_statres_corrected %>% rownames_to_column() %>% 
+  set_names(c("gene_id", "cor with W_SR", "p-val", "p_adj (bonferroni)")) %>% 
+  left_join(gene_profiles)
+WT_save_format <- WTimp_hc_statres_corrected %>% rownames_to_column() %>% 
+  set_names(c("gene_id", "cor with W_WT", "p-val", "p_adj (bonferroni)")) %>% 
+  left_join(gene_profiles)
+DL_save_format <- DLimp_hc_statres_corrected %>% rownames_to_column() %>% 
+  set_names(c("gene_id", "cor with W_DL", "p-val", "p_adj (bonferroni)")) %>% 
+  left_join(gene_profiles)
+GSI_save_format <- GSIimp_hc_statres_corrected %>% rownames_to_column() %>% 
+  set_names(c("gene_id", "cor with W_GSI", "p-val", "p_adj (bonferroni)")) %>% 
+  left_join(gene_profiles)
+
+
+output_path <- "SupplementTable1.xlsx"
+# Export supplementary table for each signal importance to Excel.
+# Skipped if the file already exists to prevent accidental overwriting.
+if (!file.exists(output_path)) {
+  write_xlsx(
+    list(
+      SRimp  = SR_save_format,
+      WTimp  = WT_save_format,
+      DLimp  = DL_save_format,
+      GSIimp = GSI_save_format
+    ),
+    path = output_path
+  )
+  message("Saved: ", output_path)
+} else {
+  message("Already exists, skipped: ", output_path)
+}
+```
+
+# Gene Ontology analysis of highly correlate genes
+
+0.  Create medaka GO database. See Nakayama et al., 2023 for GO and KO annotation method.
+1.  GO analysis for correlate genes
+2.  KO analysis for correlate genes
+
+### Create database
+
+```{r create_database}
+library(AnnotationForge)
+fSym <- gene_profiles %>% dplyr::select(gene_id, Symbol) %>% 
+  mutate(Symbol = ifelse(is.na(Symbol), gene_id, Symbol))
+colnames(fSym) <- c("GID","SYMBOL")
+
+fGO_CC <- gene_profiles %>% 
+  dplyr::select(gene_id, `Cellular.Component`) %>%
+  filter(!is.na(`Cellular.Component`)) %>%  # GOtermがNAでない行を選択
+  separate_rows(`Cellular.Component`, sep = ";") %>%  # GOtermが複数ある場合に分割
+  mutate(`Cellular.Component` = gsub("//.*", "", `Cellular.Component`))  %>% 
+  filter(`Cellular.Component`　!= "NA")
+colnames(fGO_CC) <- c("gene_id", "GO")
+
+fGO_MC <- gene_profiles %>% 
+  dplyr::select(gene_id, `Molecular.Function`) %>%
+  filter(!is.na(`Molecular.Function`)) %>%  # GOtermがNAでない行を選択
+  separate_rows(`Molecular.Function`, sep = ";") %>%  # GOtermが複数ある場合に分割
+  mutate(`Molecular.Function` = gsub("//.*", "", `Molecular.Function`))  %>% 
+  filter(`Molecular.Function`　!= "NA")
+colnames(fGO_MC) <- c("gene_id", "GO")
+
+fGO_BP <- gene_profiles %>% 
+  dplyr::select(gene_id, `Biological.Process`) %>%
+  filter(!is.na(`Biological.Process`)) %>%  # GOtermがNAでない行を選択
+  separate_rows(`Biological.Process`, sep = ";") %>%  # GOtermが複数ある場合に分割
+  mutate(`Biological.Process` = gsub("//.*", "", `Biological.Process`))  %>% 
+  filter(`Biological.Process`　!= "NA") 
+colnames(fGO_BP) <- c("gene_id", "GO")
+
+fGO <- rbind(fGO_CC, fGO_MC, fGO_BP) %>% mutate(EVIDENCE = "IEA") #Evidence code, set uniformly IEA as default.
+colnames(fGO) <- c("GID","GO", "EVIDENCE")
+
+fKO <- gene_profiles %>% 
+  dplyr::select(gene_id, Symbol, `Kegg.Orthology`) %>%
+  filter(!is.na(`Kegg.Orthology`)) %>%  # GOtermがNAでない行を選択
+  separate_rows(`Kegg.Orthology`, sep = ";") %>%  # GOtermが複数ある場合に分割
+  mutate(`Kegg.Orthology` = gsub("//.*", "", `Kegg.Orthology`))  %>% 
+  filter(`Kegg.Orthology`　!= "NA") 
+colnames(fKO) <- c("GID","Symbol", "KO")
+
+if(!file.exists("./org.Olatipes.eg.db")){
+  makeOrgPackage(gene_info=fSym, go=fGO,
+                 version="0.2",
+                 maintainer="Medaka-Ninja <so@someplace.org>",
+                 author="Medaka-Samurai <so@someplace.org>",
+                 outputDir = ".",
+                 tax_id="8090",
+                 genus="Oryzias",
+                 species="latipes",
+                 goTable="go")
+  ## then you can call install.packages based on the return value
+}
+```
+
+### GO analysis.
+
+```{r GO_entichment}
+if(!requireNamespace("./org.Olatipes.eg.db", quietly = TRUE)){install.packages("./org.Olatipes.eg.db", repos=NULL, type="source")}
+library(org.Olatipes.eg.db)
+
+enrich_plot <- function(list, ont, col, title_){
+  ego_result <- clusterProfiler::enrichGO(
+                           gene=list,
+                           OrgDb=org.Olatipes.eg.db,
+                           keyType = "GID",
+                           ont=ont, 　　　　　　　　　　　　#"BP","CC","MF","ALL"から選択
+                           pAdjustMethod="fdr",
+                           pvalueCutoff=0.1, # 0.1 returns too much result.
+                           qvalueCutoff=0.1, 
+                           readable=TRUE)
+  #Tests must pass i)
+  #pvalueCutoff on unadjusted pvalues, ii) pvalueCutoff on adjusted pvalues
+  #and iii) qvalueCutoff on qvalues to be reported.
+  #https://bioconductor.org/packages/devel/bioc/manuals/clusterProfiler/man/clusterProfiler.pdf
+  
+  if(nrow(as.data.frame(ego_result)) < 1){
+    print("no enruchment")
+      return(NA)
+  }
+  ego_result@result = ego_result@result %>% mutate(log10pvalue = log10(pvalue))
+  min_x = min(ego_result@result$log10pvalue)
+  print(ego_result@result)
+  
+  fs = 12
+  # fs = 5 when export to illustorator. 
+  g <- graphics::barplot(ego_result, x="log10pvalue", showCategory=dim(ego_result)[1], 
+                         font.size = fs, label_format = 50) + 
+    xlim(0,min_x) +
+    labs(x = "qscore", y = " ") +
+    scale_fill_gradientn(colors = c(col, col)) + 
+    theme(legend.position = "none", 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank()) + 
+    ggtitle(title_) + 
+    theme(plot.title = element_text(size = 6))
+
+  return(g)
+}
+
+
+BPSR <- enrich_plot(SRimp_highcc_geneids, "BP", "#EC2526", "W_sr high correlate: BP") 
+BPWT <-enrich_plot(WTimp_highcc_geneids, "BP", "#3B54A4", "W_wt high correlate: BP")
+BPDL <-enrich_plot(DLimp_highcc_geneids, "BP", "orange", "W_DL high correlate: BP") #NA
+BPGSI <-enrich_plot(GSIimp_highcc_geneids, "BP", "#0F8141", "W_gsi high correlate: BP") #NA
+
+MFSR <- enrich_plot(SRimp_highcc_geneids, "MF", "#EC2526", "W_sr high correlate: MF") 
+MFWT <-enrich_plot(WTimp_highcc_geneids, "MF", "#3B54A4", "W_wt high correlate: MF")
+MFDL <-enrich_plot(DLimp_highcc_geneids, "MF", "orange", "W_DL high correlate: MF") #NA
+MFGSI <-enrich_plot(GSIimp_highcc_geneids, "MF", "#0F8141", "W_gsi high correlate: MF") #NA
+
+
+MFWTsignif <- enrich_plot(WTimp_signif_geneids, "MF", "darkblue", "W_wt signif. high correlate: MF")
+BPWTsignif <- enrich_plot(WTimp_signif_geneids, "BP", "darkblue", "W_wt signif. high correlate: BP")
+
+
+highccGO <- gridExtra::grid.arrange(MFSR, MFWT, BPWT,heights = c(1.1, 1, 1.8))
+sigccGO <-  gridExtra::grid.arrange(MFWTsignif, BPWTsignif,  heights = c(1.0, 0.9))
+
+GOresult <- gridExtra::grid.arrange(highccGO, sigccGO, ncol=2) 
+
+#copy and paste to the console.
+
+{
+  plot(GOresult)
+  grid.text("a", x = unit(0.01, "npc"), y = unit(1, "npc"),
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("b", x = unit(0.01, "npc"), y = unit(0.8, "npc"),
+          just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("c", x = unit(0.01, "npc"), y = unit(0.63, "npc"),
+          just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("d", x = unit(0.01, "npc"), y = unit(0.3, "npc"), 
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("e", x = unit(0.01, "npc"), y = unit(0.1, "npc"), 
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("f", x = unit(0.55, "npc"), y = unit(1, "npc"), 
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("g", x = unit(0.55, "npc"), y = unit(0.48, "npc"), 
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+}
+
+
+# Since the figure is large, we recommend viewing it in the plot pane
+# before exporting. Uncomment the lines below to save as PDF.
+# ggplot2::ggsave(
+#   filename = "FiguresV2/Fig3raw.pdf",
+#   plot     = fig3,
+#   width    = 7.13,
+#   height   = 6.7,
+#   units    = "in"
+# )
+
+plot(GOresult)
+```
+
+### KO analysis.
+
+Although single gene may be associated with multiple K numbers, since the background data shares the same characteristics, this does not pose a problem.
+
+```{r KO_enrichment}
+ KO_enrich_plot <- function(target_Knumbers, col){
+    KOe_result <- clusterProfiler::enrichKEGG(
+      target_Knumbers,
+      organism = "ko", 
+      # "you can use enrichKEGG with K number by specifying organism="ko". 
+      # https://github.com/YuLab-SMU/clusterProfiler/issues/99
+      keyType = "kegg",
+      pvalueCutoff = 0.1,
+      qvalueCutoff = 0.1,
+      pAdjustMethod = "fdr",
+      minGSSize = 10,
+      maxGSSize = 500,
+      universe = fKO$KO,
+      use_internal_data = FALSE
+    )
+    
+  KOe_result@result = KOe_result@result %>% mutate(log10pvalue = log10(pvalue))
+  min_x = min(KOe_result@result$log10pvalue)
+  print(paste("enrich:",dim(KOe_result)[1]))
+  
+  g <- graphics::barplot(KOe_result, x="log10pvalue", showCategory=dim(KOe_result)[1], 
+                         font.size = 12, label_format = 50) + 
+    xlim(0,min_x) +
+    labs(x = "-log10(pvalue)", y = "") +
+    scale_fill_gradientn(colors = c(col, col)) + 
+    theme(legend.position = "none", 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank())
+
+  return(g)
+}
+
+
+SR_knumbers <- filter(fKO, is.element(GID, SRimp_highcc_geneids))$KO
+WT_knumbers <- filter(fKO, is.element(GID, WTimp_highcc_geneids))$KO
+DL_knumbers <- filter(fKO, is.element(GID, DLimp_highcc_geneids))$KO
+GSI_knumbers <- filter(fKO, is.element(GID, GSIimp_highcc_geneids))$KO
+WTsignif_knumbers <- filter(fKO, is.element(GID, WTimp_signif_geneids))$KO
+
+KeggSR <-  KO_enrich_plot(SR_knumbers, "#EC2526") #NA
+KeggWT <- KO_enrich_plot(WT_knumbers, "#3B54A4") #NA
+KeggDL <- KO_enrich_plot(DL_knumbers, "orange") #NA
+KeggGSI <- KO_enrich_plot(GSI_knumbers, "#0F8141") #NA
+#g1 <- gridExtra::grid.arrange(KeggSR,KeggWT,KeggGSI, nrow=3,ncol=1, heights=c(1.5,0.8,0.6))
+
+KO_enrich_plot(WTsignif_knumbers, "darkblue")
+#KO_enrich_plot(SRsignif_knumbers, "#EC2526")
+#KO_enrich_plot(DLsignif_knumbers, "orange")
+
+KOe_result <- clusterProfiler::enrichKEGG(
+    WTsignif_knumbers,
+    organism = "ko", 
+    keyType = "kegg",
+    pvalueCutoff =0.1,
+    qvalueCutoff = 0.1,
+    pAdjustMethod = "fdr",
+    universe = fKO$KO,
+    minGSSize = 10,
+    maxGSSize = 500,
+    use_internal_data = FALSE
+)
+namekodf <- fKO %>% filter(is.element(GID, WTimp_signif_geneids)) %>% 
+  mutate(Symbol = ifelse(is.na(Symbol), GID, Symbol))
+
+symbols = sapply(KOe_result@result$geneID,function(ko){
+  v1 = namekodf %>% filter(is.element(KO, strsplit(ko, "/")[[1]]))
+  v2 = unique(v1$Symbol)
+  return(paste(toString(v2), sep=","))
+}) %>% unlist()
+
+
+
+KOe_result@result <- cbind(KOe_result@result, symbols)
+KOe_result@result = KOe_result@result %>% mutate(log10pvalue = log10(pvalue))
+min_x = min(KOe_result@result$log10pvalue)
+KeggSignifWT <- 
+   graphics::barplot(KOe_result, x="log10pvalue", showCategory=dim(KOe_result)[1], 
+                         font.size = 5, label_format = 20) + 
+    xlim(0,min_x) +
+    labs(x = "-log10(pvalue)", y = "") +
+    theme(legend.position = "none", 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank()) +
+  geom_text(aes(label=symbols, x=-0.04), size = 1, color = "white",
+            show.legend = FALSE,
+            position = position_dodge(0),
+            hjust = 0) + 
+  scale_fill_gradientn(colors = c("darkblue", "darkblue")) + 
+  ggtitle("W_wt significantly correlate: KO") +
+   theme(plot.title = element_text(size = 6))
+
+plot(KeggSignifWT)
+```
+
+```{r create_figure2}
+highccGOMF <- gridExtra::grid.arrange(MFSR, MFWT, ncol=1, heights=c(1.8,2.8))
+fig3cplot <- gridExtra::grid.arrange(highccGOMF, KeggSignifWT, ncol=2) 
+fig3 <- gridExtra::grid.arrange(Fig3abplot, fig3cplot,  nrow=2, heights=c(1,1))
+
+
+{
+  #ggplot transaction
+  plot(fig3)
+  grid.text("a", x = unit(0.01, "npc"), y = unit(1, "npc"),
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("b", x = unit(0.79, "npc"), y = unit(1, "npc"),
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+  grid.text("c", x = unit(0.01, "npc"), y = unit(0.5, "npc"),
+            just = c("left", "top"), gp = gpar(fontsize = 7, fontface = "bold"))
+}
+
+#ggplot2::ggsave('FiguresV2/Fig3tmp.pdf',fig3, 
+#               width=7.13, height =6.7, units = "in")
+```
+
+# Comparing expression dynamics in room and outdoor conditions.
+
+### Loading RNA-seq data: GSE234565
+
+Transcriptome data collected under stable indoor conditions (constant environment, no seasonal variation).\
+GEO accession: <https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE234565>
+
+```{r LoadRoomRNAseq}
+library(readxl)　
+
+# Automatically download.
+# If this does not work, download excel file manually from below link.
+#url = "https://ftp.ncbi.nlm.nih.gov/geo/series/GSE234nnn/GSE234565/suppl#/GSE234565%5FFPKM%5Fmedaka%5Fconstant%5FRNA%2Dseq%2Exlsx"
+#temp_file <- tempfile(fileext = ".xlsx")
+#curl::curl_download(url, temp_file)
+
+temp_file <- "GSE234565_FPKM_medaka_constant_RNA-seq.xlsx"
+print(excel_sheets(temp_file))  # AllSamples.GeneExpression.FPKM_
+medaka_room_RNAseq_raw <- read_excel(temp_file, sheet = 1)
+medaka_room_RNAseq <- medaka_room_RNAseq_raw %>% 
+  dplyr::select(-"SymbolID", -"transcript_id(s)", -"Cellular Component", -"Molecular Function", -"Biological Process", -"Kegg Orthology", -"Nr Description") %>% 
+  column_to_rownames("gene_id")
+
+
+head(medaka_room_RNAseq)
+```
+
+### Data formatting
+
+Samples are named according to the number of days elapsed since transfer to indoor conditions. The exact post-transfer day for each sample is listed in its metadata　(<https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM7471033>).\
+Collection month is indicated in Fig. S1E of Nakayama et al., 2023 (manually stored in the variable `sample_month`) .
+
+```{r DataFormattingRoomRNAseq}
+
+# data attribute.
+days_after_transition <- c(0, 0, 0, 7, 7, 7, 30, 30, 30, 60, 60, 90, 90, 90, 120, 120, 120, 150, 150, 150)
+sample_labels <- c("sample1", "sample2", "sample3", "sample1", "sample2", "sample3", "sample1", "sample2", "sample3", "sample1", "sample2","sample1", "sample2",
+                   "sample3", "sample1", "sample2", "sample3", "sample1", "sample2", "sample3")
+sample_month <- c(3, 3, 3, 3.2, 3.2, 3.2, 4, 4, 4, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 8)
+
+colnames(medaka_room_RNAseq) <- sample_labels
+sample1 <- medaka_room_RNAseq[,colnames(medaka_room_RNAseq) == "sample1"] 
+sample2 <- medaka_room_RNAseq[,colnames(medaka_room_RNAseq) == "sample2"] 
+sample3_ <- medaka_room_RNAseq[,colnames(medaka_room_RNAseq) == "sample3"] 
+
+colnames(sample1) <- days_after_transition[which(sample_labels == "sample1")]
+colnames(sample2) <- days_after_transition[which(sample_labels == "sample2")]
+colnames(sample3_) <- days_after_transition[which(sample_labels == "sample3")] 
+
+# “60 days after transition”  in Sample 3 which have no data is filled with missing values.
+sample3 <- mutate(sample3_, "60"=NA) 
+column_order = colnames(sample3) %>% as.numeric() %>% sort() %>% as.character()
+sample3 <- sample3[,column_order]
+
+# Taking average among sample
+medaka_room_RNAseq_merge <- rbind(rownames_to_column(sample1), rownames_to_column(sample2), rownames_to_column(sample3)) %>% group_by(rowname)
+medaka_room_RNAseq_ave <- summarize(medaka_room_RNAseq_merge , "0"=mean(`0`), "7"=mean(`7`), "30"=mean(`30`), "60"=mean(`60`, na.rm=TRUE), "90"=mean(`90`), "120"=mean(`120`), "150"=mean(`150`)) %>% 
+  column_to_rownames("rowname") 
+
+
+
+
+
+# Extract outdoor samples corresponding to the period (Mar~Aug) during which indoor samples were collected.
+
+FIRST_YEAR_INDEX = c(6:11)
+#SECOND_YEAR_INDEX = c(18:23)
+medaka_outdoor_RNAseq_s1 = medaka_2y_RNAseq_s1[,FIRST_YEAR_INDEX]
+medaka_outdoor_RNAseq_s2 = medaka_2y_RNAseq_s2[,FIRST_YEAR_INDEX]
+medaka_outdoor_RNAseq_ave = medaka_2y_RNAseq_ave[,FIRST_YEAR_INDEX]
+```
+
+```{r testplot}
+
+plot3_sample_v2 <- function(genename){
+    
+  # Data frame creation
+  symb = filter(symbol_to_geneid, gene_id == genename)$Symbol
+  if(is.na(symb)){symb = genename}
+  g <- data.frame(time = unique(sample_month),
+                  meanval = as.numeric(medaka_room_RNAseq_ave[genename,]),
+                  sample1 = as.numeric(sample1[genename,]),
+                  sample2 = as.numeric(sample2[genename,]),
+                  sample3 = as.numeric(sample3[genename,])
+  ) %>% ggplot() + 
+    geom_line(aes(x=time, y=meanval, color="Room")) +
+    geom_point(aes(x=time, y=sample1, color="Room"), shape=20,size=0.8) + 
+    geom_point(aes(x=time, y=sample2, color="Room"), shape=20,size=0.8) + 
+    geom_point(aes(x=time, y=sample3, color="Room"), shape=20,size=0.8) + 
+    ylab("FPKM") + 
+    xlab("Time (month)") + 
+    ggtitle(symb)
+  
+
+  # Adding points for outdoor samples
+  
+  OutPoint <- data.frame(
+    outtime= c(3:8),
+    meanval =  as.numeric(medaka_outdoor_RNAseq_ave[genename,]),
+    rep1 = as.numeric(medaka_outdoor_RNAseq_s1[genename,]),
+    rep2 = as.numeric(medaka_outdoor_RNAseq_s2[genename,]))
+  
+  g <- g + 
+    geom_point(data = OutPoint, aes(x=outtime, y=rep1, color="Outdoor"), shape=20,size=0.8) + 
+    geom_point(data = OutPoint, aes(x=outtime, y=rep2, color="Outdoor"), shape=20,size=0.8) + 
+    geom_line(data = OutPoint, aes(x=outtime, y=meanval, color="Outdoor")) + 
+    scale_color_manual(values = c("Room" = "purple", "Outdoor" = "black")) + 
+    scale_linetype_manual(values = c("Room" = "dashed", "Outdoor" = "solid")) +
+    labs() + 
+    theme(
+      base_size=6,
+      legend.position = "none", 
+        legend.text = element_text(size = 6)) 
+  
+  
+  # Plot the graph
+  return(g)
+}
+
+room_out_WT_comp <- gridExtra::grid.arrange(
+  grobs = lapply(WTimp_signif_geneids, plot3_sample_v2), ncol = 2
+)
+
+
+
+```
+
+### Comparing the expression profile in room and outdoor.
+
+```{r room_outdoor_comp}
+
+library(exactRankTests)
+## 配色や定数をまとめて管理
+COLORS <- list(Room = "purple", Outdoor = "black")
+
+## ──────────────────────────────────────────────────────────
+##  1. ボックスプロット ＆ Wilcoxon 検定
+## ──────────────────────────────────────────────────────────
+
+library(coin)
+
+make_expr_df <- function(gene_id) {
+  # sample 1,2,and 3
+  room <- c(sample1[gene_id, ], sample2[gene_id, ], sample3[gene_id, ]) |>
+          as.numeric() |>
+          tibble(FPKM = _, category = "Room")
+  
+  # sample 1 and 2
+  outdoor <- c(medaka_outdoor_RNAseq_s1[gene_id,], medaka_outdoor_RNAseq_s2[gene_id,]) |>
+             as.numeric() |>
+             tibble(FPKM = _, category = "Outdoor")
+
+  bind_rows(room, outdoor)
+}
+
+
+plot_box_gene <- function(gene_id) {
+  df   <- make_expr_df(gene_id)
+  symb <- symbol_to_geneid %>% filter(gene_id == !!gene_id) %>% pull(Symbol) %>% 
+          {ifelse(length(.) == 0 | is.na(.), gene_id, .)}
+  
+  p_val <- wilcox.exact(log2(df$FPKM[df$category == "Room"]),
+                        log2(df$FPKM[df$category == "Outdoor"]),
+                        paired = FALSE)$p.value
+  
+  ggplot(df, aes(category, log2(FPKM))) +
+    geom_boxplot(aes(color=category, linetype=category), linewidth=0.1, fill=NA, outlier.shape = NA) + 
+    geom_jitter(size = 0.2, aes(color=category)) + xlab("") + ggtitle(symb) + 
+    scale_fill_manual(values = c("Room" = "purple", "Outdoor" = "black")) + 
+    scale_color_manual(values = c("Room" = "purple", "Outdoor" = "black")) + 
+    scale_linetype_manual(values = c("Room" = "solid", "Outdoor" = "solid")) +
+    theme(legend.position = "none") +
+    labs(title = symb,
+         subtitle = sprintf("Wilcoxon p = %.3g", p_val),
+         x = NULL, y = "log2(FPKM)", size=4) +
+    theme(legend.position = "none")
+}
+
+## 例：上位 5 遺伝子を並べて描画
+room_out_WT_wilcox <- gridExtra::grid.arrange(
+  grobs = lapply(WTimp_signif_geneids, plot_box_gene),
+  ncol = 4
+)
+
+
+## ──────────────────────────────────────────────────────────
+##  2. CCF (相互相関) プロット
+## ──────────────────────────────────────────────────────────
+
+mt <- unique(sample_month)
+mtout <- c(3.0:8.0)
+  
+plot_ccf_gene <- function(gene_id) {
+  symb <- symbol_to_geneid %>% filter(gene_id == !!gene_id) %>% pull(Symbol) %>% 
+          {ifelse(length(.) == 0 | is.na(.), gene_id, .)}
+  
+  room_vec <- approx(mt,  medaka_room_RNAseq_ave[gene_id, ])$y
+  out_vec  <- approx(mtout, medaka_outdoor_RNAseq_ave[gene_id, ])$y
+  time_vec <- approx(mtout, medaka_outdoor_RNAseq_ave[gene_id, ])$x
+  
+  
+  p_val <- cor.test(scale(room_vec), scale(out_vec))$p.value
+  ccf_dat <- ccf(scale(room_vec)[,1], scale(out_vec)[,1], plot = FALSE)
+  
+  tibble(lag = ccf_dat$lag*diff(time_vec)[1], acf = ccf_dat$acf) %>% 
+    ggplot(aes(lag, acf)) +
+    geom_col(fill = "grey60") +
+    geom_hline(yintercept = 0, color = "black") +
+    labs(title = symb,
+         subtitle = sprintf("Spearman p = %.3g", p_val),
+         x = "Lag (month)", y = "CCF") +
+    ylim(-1, 1) +
+    theme(base_size = 6,
+          legend.text = element_text(size = 6))
+}
+
+room_out_WT_ccf <- gridExtra::grid.arrange(
+  grobs = lapply(WTimp_signif_geneids, plot_ccf_gene),
+  ncol = 2
+)
+
+## ──────────────────────────────────────────────────────────
+##  3. 発現レベル・動態類似度テスト
+## ──────────────────────────────────────────────────────────
+
+similarity_test <- function(gene_id) {
+  room_pt <- as.numeric(c(sample1[gene_id, ], sample2[gene_id, ], sample3[gene_id, ]))
+  out_pt  <- as.numeric(c(medaka_outdoor_RNAseq_s1[gene_id, ], medaka_outdoor_RNAseq_s2[gene_id, ]))
+  room_ts <- approx(mt,    medaka_room_RNAseq_ave[gene_id, ])$y
+  out_ts  <- approx(mtout, medaka_outdoor_RNAseq_ave[gene_id, ])$y
+  wil_p  <- wilcox.exact(room_pt, out_pt, paired = FALSE)$p.value
+  cor_p <- tryCatch(
+    {
+      cor.test(
+        scale(room_ts),
+        scale(out_ts),
+      )$p.value
+    },
+    error = function(e) {
+      NA_real_   # エラー時は NA を返す
+    }
+  )
+  log2FD <- log2(mean(out_ts) / mean(room_ts))
+  c(wil_p = wil_p, cor_p = cor_p, log2FD = log2FD)
+}
+
+## 進捗付き実行
+applied_gene <- intersect(rownames(medaka_room_RNAseq_ave), rownames(medaka_outdoor_RNAseq_ave))
+sim_res <- pbsapply(applied_gene, similarity_test) |> 
+           t() %>%  as.data.frame() %>%  rownames_to_column("gene_id")
+
+## 多重検定補正と注釈
+sim_res_corrected <- sim_res %>% 
+  mutate(wil_p_adj = p.adjust(wil_p, method = "bonferroni"),
+         cor_p_adj = p.adjust(cor_p, method = "bonferroni"),
+         is_strict = gene_id %in% c(WTimp_signif_geneids)) %>% 
+  left_join(symbol_to_geneid, by = c("gene_id" = "gene_id")) %>% 
+  mutate(Symbol = coalesce(Symbol, gene_id)) #if symnols is missing, fill with gene_id.
+
+library(ggrepel)          # ラベル配置
+
+sim_res_corrected_tmp = sim_res_corrected %>% mutate(paint = (wil_p_adj < 0.01 & cor_p_adj >= 0.01))
+wilcox_ccf_plot <-
+  ggplot(sim_res_corrected_tmp, aes(log10(wil_p_adj), log10(cor_p_adj))) +
+  geom_point(alpha = 0.3, size=0.8, aes(colour = paint)) +
+  geom_hline(yintercept = -2, linetype = "dashed") +
+  geom_vline(xintercept = -2, linetype = "dashed") +
+  geom_label_repel(data = filter(sim_res_corrected, is_strict), 
+              aes(label = Symbol), 
+              size=2,
+              box.padding = 1,   # Padding around the text
+              point.padding = 0, # Padding between text and point
+              segment.color = "black",  # Color of the connecting lines
+              segment.size = 0.3) + 
+  scale_colour_manual(values = c("grey", "skyblue"), guide = "none") +
+  labs(x = "Expression-level similarity (log10 adj-p)",
+       y = "Dynamic similarity (log10 adj-p)",
+       color = NULL) +
+  theme_classic(base_size = 6) 
+
+## 散布図
+#circannual_genes <- read.csv("pnas2313514120sd07.csv")
+#sim_res_corrected <- sim_res_corrected %>% mutate()
+
+## ──────────────────────────────────────────────────────────
+##  4. Fisher 検定（期待 vs 観測 2×2）
+## ──────────────────────────────────────────────────────────
+fisher_change_test <- function(df, strict_set, p_thres = 0.01) {
+  change_all  <- df %>% filter(wil_p_adj < p_thres, cor_p_adj >= p_thres)
+  change_str  <- change_all %>% filter(gene_id %in% strict_set)
+  valid_test_size <- df  %>% filter(gene_id %in% strict_set) %>% nrow()
+  
+  tbl <- matrix(c(nrow(change_str),
+                  valid_test_size - nrow(change_str),
+                  nrow(change_all)   - nrow(change_str),
+                  nrow(df) - valid_test_size - (nrow(change_all) - nrow(change_str))),
+                nrow = 2, byrow = TRUE,
+                dimnames = list(c("Signif.", "All"),
+                                c("Change", "No-change")))
+  list(table = tbl, fisher = fisher.test(tbl))
+}
+
+# speaman(alt: greater), wilcox(alt:both) => p=0.05
+ft_out <- fisher_change_test(sim_res_corrected, WTimp_signif_geneids)
+print(ft_out$fisher)
+print(ft_out$table)
+
+
+ftdf <- ft_out$table %>% as.data.frame() %>% 
+  rownames_to_column("Category") %>% pivot_longer(c(Change, `No-change`))
+colnames(ftdf) <- c("Category", "Type", "Value")
+
+ft_plot <- ggplot(ftdf, aes(x = Type, y = Value, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ Category, scales = "free_y") +  # カテゴリごとに個別のグラフ
+  labs(title = "",
+       x = "", y = "# Gene") +
+  scale_fill_manual(values = c("skyblue", "grey")) +
+  theme_minimal() + 
+  facet_wrap(~ Category, scales = "free_y") +
+  theme(legend.position = "bottom") + theme_classic(base_size=6) + 
+  theme(
+    base_size=6,
+    legend.text = element_text(size = 6),
+    legend.position = "None"
+  ) 
+
+```
+
+\
+
+### create figure4
+
+```{r create_plotfig4}
+
+fig4row1 <- gridExtra::grid.arrange(nullGrob(), room_out_WT_comp, ncol=2, widths=c(1.8,2.8))
+fig4row2 <-  gridExtra::grid.arrange(room_out_WT_wilcox, room_out_WT_ccf, ncol=2, 
+                                     widths=c(1,1))
+
+fig4row3 <-  gridExtra::grid.arrange(wilcox_ccf_plot, ft_plot, ncol=2, widths=c(2,1))
+
+fig4 <- gridExtra::grid.arrange(fig4row1, fig4row2, fig4row3, nrow=3, heights=c(1,1,1.2)) 
+fig4
+
+#copy and paste to the console.
+
+ggplot2::ggsave('FiguresV2/Fig4raw_0708_v2.pdf',fig4, 
+               width=7.13, height =6.7, units = "in")
+
+```
+
+#### additional analysis: circaannual genes identified in the Nakayama et al., 2024.
+
+```{r additionnal}
+
+circannual_genes_df <- read.csv("./pnas2313514120sd07.csv") 
+
+# Oscillating genes in the constant (LW) condition.
+#nsSOGs <- read.csv("./pnas2313514120sd06.csv")
+#circannual_gene_ids <- intersect(nsSOGs$Gene.ID, LW_nonlinears$Gene.ID)
+circannual_gene_ids <- circannual_genes_df$Gene.I
+
+sim_res_corrected_circa <- sim_res_corrected %>% 
+  mutate(paint = ifelse((wil_p_adj > 0.01 & cor_p_adj <= 0.01), "q4","other"))  %>% 
+  mutate(is_circa = (gene_id %in% circannual_gene_ids))
+
+wilcox_ccf_plot_circa <-
+  ggplot(sim_res_corrected_circa, aes(log10(wil_p_adj), log10(cor_p_adj))) +
+  geom_point(shape=21, aes(alpha = is_circa, size=is_circa, fill = paint, color=is_circa)) +
+  geom_hline(yintercept = -2, linetype = "dashed") +
+  geom_vline(xintercept = -2, linetype = "dashed") +
+  scale_color_manual(values = c("grey", "black")) +
+  scale_fill_manual(values = c(q4="pink", "other"="grey")) +
+  scale_alpha_manual(values = c(0.4, 0.8)) +
+  scale_size_manual(values = c(1, 3)) +
+  labs(x = "Expression-level similarity (log10 adj-p)",
+       y = "Dynamic similarity (log10 adj-p)",
+       color = NULL) +
+  theme_classic(base_size = 6) + 
+  theme(legend.position = "none")  # ← これを追加
+
+
+fisher_coherent_test <- function(df, test_set, p_thres = 0.01) {
+  coherent  <- df %>% filter(wil_p_adj > p_thres, cor_p_adj <= p_thres)
+  valid_test_size <- df  %>% filter(gene_id %in% test_set) %>% nrow()
+  coherent_str  <- coherent %>% filter(gene_id %in% test_set)
+  
+  tbl <- matrix(c(nrow(coherent_str),
+                   valid_test_size - nrow(coherent_str),
+                  nrow(coherent)   - nrow(coherent_str),
+                  nrow(df) - valid_test_size - (nrow(coherent) - nrow(coherent_str))),
+                nrow = 2, byrow = TRUE,
+                dimnames = list(c("Circa.", "All"),
+                                c("Coherent", "No-coherent")))
+  list(table = tbl, fisher = fisher.test(tbl))
+}
+
+ft_coherent_circa <- fisher_coherent_test(sim_res_corrected, circannual_gene_ids)
+print(ft_coherent_circa$fisher)
+
+ft_coherent_circa_df <- ft_coherent_circa$table %>% as.data.frame() %>% 
+  rownames_to_column("Category") %>% 
+  pivot_longer(c(Coherent, `No-coherent`)) %>% 
+  setNames(c("Category", "Type", "Value"))
+
+#ft_coherent_circa_gg <-
+#  ggplot(ft_coherent_circa_df, aes(x = Type, y = Value, fill = Type)) +
+#  geom_bar(stat = "identity", position = "dodge") +
+#  facet_wrap(~ Category, scales = "free_y") +  # カテゴリごとに個別のグラフ
+#  labs(title = "", x = "", y = "# Gene") +
+#  scale_fill_manual(values = c("grey", "grey")) +
+#  theme_minimal() + 
+#  facet_wrap(~ Category, scales = "free_y") +
+#  theme(legend.position = "bottom") + theme_classic(base_size=6) + 
+#  theme(
+#    base_size=6,
+#    legend.text = element_text(size = 6),
+#    legend.position = "None"
+#  ) 
+
+ratio_coherent_circa_gg <- ft_coherent_circa_df %>%
+  group_by(Category) %>%
+  mutate(Ratio = Value / sum(Value)) %>%
+  filter(Type == "Coherent") %>% 
+  ggplot(aes(x = Category, y = Ratio)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = "Category", y = "Proportion of Coherent", title = "Coherent Ratio by Category") +
+  theme_classic(base_size = 6)
+
+
+#ft_change_circa <- fisher_change_test(sim_res_corrected, circannual_gene_ids)
+#print(ft_change_circa$fisher) 
+
+#ft_change_circa_df <- ft_change_circa$table %>% as.data.frame() %>% 
+#  rownames_to_column("Category") %>% 
+#  pivot_longer(c(Change, `No-change`)) %>% 
+#  setNames(c("Category", "Type", "Value")) %>% 
+#  mutate(Category = ifelse(Category == "Signif.", "Circa." ,Category))
+
+
+#ft_change_circa_gg <-
+#  ggplot(ft_change_circa_df, aes(x = Type, y = Value, fill = Type)) +
+#  geom_bar(stat = "identity", position = "dodge") +
+#  facet_wrap(~ Category, scales = "free_y") +  # カテゴリごとに個別のグラフ
+#  labs(title = "", x = "", y = "# Gene") +
+#  scale_fill_manual(values = c("skyblue", "grey")) +
+#  theme_minimal() + 
+#  facet_wrap(~ Category, scales = "free_y") +
+#  theme(legend.position = "bottom") + theme_classic(base_size=6) + 
+#  theme(
+#    base_size=6,
+#    legend.text = element_text(size = 6),
+#    legend.position = "None"
+#  ) 
+
+#ratio_change_circa_gg <-ft_change_circa_df %>%
+#  group_by(Category) %>%
+#  mutate(Ratio = Value / sum(Value)) %>%
+#  filter(Type == "Change") %>% 
+#  ggplot(aes(x = Category, y = Ratio)) +
+#  geom_bar(stat = "identity", fill = "steelblue") +
+#  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+#  labs(x = "Category", y = "Proportion of Change", title = "Change Ratio by Category") +
+#  theme_classic(base_size = 6)
+
+
+#proportion_gg <- gridExtra::grid.arrange(ft_change_circa_gg, 
+#                        ratio_change_circa_gg, 
+#                        ft_coherent_circa_gg,
+#                        ratio_coherent_circa_gg, nrow=2, widths=c(1.5,1)) 
+
+#proportion_gg <- gridExtra::grid.arrange(ft_coherent_circa_gg, ratio_coherent_circa_gg, nrow=1#, widths=c(1.5,1)) 
+
+#circa_analysis <- gridExtra::grid.arrange(wilcox_ccf_plot_circa, 
+#                                          proportion_gg, nrow=2, heights=c(1,1)) 
+
+circa_analysis <- gridExtra::grid.arrange(wilcox_ccf_plot_circa, ratio_coherent_circa_gg, 
+                                          nrow=1, widths=c(2,1)) 
+
+ggplot2::ggsave('FiguresV2/Circannual_analysis_v5.pdf',circa_analysis, 
+               width=7.13, height =3.0, units = "in")
+
+plot(circa_analysis)
+
+# The limited number of observations below the threshold is an expected outcome, given that a conservative statistical test was employed.
+```
+
+# Sex hormone analysis
+
+### Load Environmental data and GSI
+
+Load signal importance generated from \*\*.py. See our method for detail estimation process. Convert twice per month data into once per month to align with the RNA-seq data.
+
+```{r LoadSignalImportance}
+
+
+Data1input = read.csv("../data/20151001_20171015_env_split.csv", row.names = 1)
+Data1output = read.csv("../data/20151001_20171015_out_split.csv", row.names = 1)
+
+sample_point <- format(as.Date(Data1output$Time_raw, format = "%Y-%m-%d %H:%M:%S"), "%y-%m/%d")
+Data1output = Data1output %>% mutate(sample_point = sample_point)
+GSIData <- Data1output[is.element(sample_point, colnames(medaka_2y_RNAseq_ave)),]
+
+sample_point <- format(as.Date(Data1input$Time_raw, format = "%Y-%m-%d"), "%y-%m/%d")
+Data1input = Data1input %>% mutate(sample_point = sample_point)
+EnvData <- Data1input[is.element(sample_point, colnames(medaka_2y_RNAseq_ave)),]
+
+head(signal_importance)
+head(GSIData)
+head(EnvData)
+```
+
+### Comparison of sex hormone (estrogen receptor) and Signal importance.
+
+#### 1. Extract hormone genes using the following queries: 'medaka_female_sex_hormone_evidence.html'
+
+```{r echo=FALSE, results='asis'}
+htmltools::includeHTML("./medaka_female_sex_hormone_evidence.html")
+```
+
+```{r sexhormoneextract}
+
+# Keyword query for the Symbol column (gene names)
+fs_hormn_query <- c(
+  "cyp19a1a", "cyp19b",
+  "cyp17a2", "cyp17", "cyp11a", "cyp11b", "cyp21a2",
+  "star", "hsd3b", "hsd17b1", "hsd17b3", "hsd17b4", "hsd17b8", "hsd17b14",
+  "srd5a1", "srd5a2", "srd5a3",
+  "esr1", "esr2", "pgr", "ar-alpha",
+  "nr5a1", "fshr", "lhcgr"
+)
+
+# Regex pattern for Nr Description search.
+# "star" is excluded to avoid spurious matches (too short/common).
+fs_hormn_query_regex <- paste0(
+  "\\b(", paste(setdiff(fs_hormn_query, "star"), collapse = "|"), ")\\b"
+)
+
+# KEGG Orthology terms for steroidogenesis enzymes
+fs_hormn_kos <- c("K07434", "K00513", "K00070", "K12343")
+
+# Filter genes by:
+# (1) exact Symbol match
+# (2) regex match in Nr Description
+# (3) KEGG Orthology term
+# Then deduplicate by Symbol and retain only genes present in the expression matrix.
+sex_hormone_genes <- gene_profiles %>%
+  filter(
+    tolower(Symbol) %in% fs_hormn_query |
+    str_detect(Nr.Description, regex(fs_hormn_query_regex, ignore_case = TRUE)) |
+    Kegg.Orthology %in% fs_hormn_kos
+  ) %>%
+  distinct(Symbol, .keep_all = TRUE) %>%
+  filter(gene_id %in% rownames(medaka_2y_RNAseq_ave))
+
+sex_hormone_genes %>%
+  dplyr::select(Symbol, Kegg.Orthology, Nr.Description)
+# %>% write.csv("Sex_hormone_genes.csv")
+```
+
+#### 2. Visualize the dynamics of sex hormone genes
+
+```{r genevisualize}
+
+fs_plot_df <- medaka_2y_RNAseq_ave_norm[sex_hormone_genes$gene_id,] %>% 
+  t() %>% as.data.frame() %>% mutate(sample_point=c(1:24)) %>% 
+  pivot_longer(cols=sex_hormone_genes$gene_id) %>% 
+  left_join(symbol_to_geneid, by = c("name"="gene_id"))
+
+
+fsg_dyn_gplot <- ggplot(fs_plot_df, aes(x = sample_point, y = value)) +
+  geom_point() + geom_line() + 
+  labs(x = "Sample Date", y = "Value", title = "") +
+  scale_x_continuous(
+      breaks = seq(1, 26, by = 4),  # ラベルを設定する位置
+      labels = c("10", "02", "06","10","02","06","10")
+    ) + 
+    ylab("Normalize") + xlab("Time (month)") + 
+  facet_wrap(~Symbol, nrow=4) + theme_classic()
+fsg_dyn_gplot
+```
+
+#### 2.5. See all comparison.
+
+```{r allcomp}
+library(tidyverse)
+library(patchwork)
+library(cowplot)
+
+# ───────────────────────────── 1. セル描画関数 ────────────────────────────
+comp_plot_cell <- function(geneid, comp_value, color, lastid){
+  cpl = 
+    tibble(sample_point = 1:24,
+         gene_z  = scale(as.numeric(medaka_2y_RNAseq_ave_norm[geneid, ])),
+         comp_z  = scale(as.numeric(comp_value))) |>
+    ggplot() +
+      geom_line (aes(sample_point, gene_z , colour = "g"), size = .25) +
+      geom_point(aes(sample_point, gene_z , colour = "g"), size = .01) +
+      geom_line (aes(sample_point, comp_z , colour = "c"), size = .25) +
+      geom_point(aes(sample_point, comp_z , colour = "c"), size = .01) +
+      scale_colour_manual(values = c(g = "black", c = color), guide = "none") 
+    if(geneid == lastid){
+      cpl + theme_classic(base_size=6) + 
+        theme(
+            axis.line.y = element_blank(),     # y軸の線を非表示
+            axis.ticks.y = element_blank(),    # y軸の目盛りを非表示
+            axis.ticks.x = element_blank(),    # y軸の目盛りを非表示
+            axis.text.y = element_blank(),     # y軸のラベルを非表示
+            axis.title.y = element_blank()     # y軸のタイトルも非表示
+        ) + 
+        xlab("Time (month)") + 
+          scale_x_continuous(
+            breaks = seq(1, 26, by = 4),  # ラベルを設定する位置
+            labels = c("10", "02", "06", "10", "02", "06", "10")
+        ) %>% return()
+    }else{
+      cpl + theme_void(base_size=6) %>% return()
+    }
+}
+
+# ───────────────────────────── 2. データ準備 ─────────────────────────────
+signal_importance_tmp <- signal_importance |>
+  set_names(c("Time_raw","W_SR","W_WT","W_DL","W_GSI"))
+
+
+
+EnvDataDf <- dplyr::bind_cols(
+  dplyr::select(signal_importance_tmp, W_SR, W_WT, W_GSI),
+  dplyr::select(EnvData, SR, WT),
+  dplyr::select(GSIData, Female_mean, deltaFemaleGSI)
+)
+
+env_names <- colnames(EnvDataDf)          # 7 変数
+gene_ids  <- sex_hormone_genes$gene_id    # 16 遺伝子
+env_cols  <- setNames(c("#EC2526",  "#3B54A4", "#0F8141", 
+                        "#F5988F",  "#8DA3E6", "#6ACF9E", "grey"), env_names)
+
+make_cell <- function(g, e){
+  comp_plot_cell(g, EnvDataDf[[e]], env_cols[[e]], gene_ids[length(gene_ids)])
+}
+
+plot_tbl <- expand_grid(gene = gene_ids, env = env_names) |>   # gene 行優先
+  mutate(cell =  purrr::map2(gene, env, make_cell))
+
+# ───────────────────────────── 3. 16×7 格子を生成 ────────────────────────
+big_plot <- wrap_plots(plot_tbl$cell,
+                       ncol = length(env_names), byrow = TRUE) &
+            theme(plot.margin = margin(1, 1, 1, 1, "mm"))
+
+
+# ───────────────────────────── 4. 行・列ラベルを後付け ───────────────────
+# 列（環境）の中心 x 座標
+col_pos <- (seq_along(env_names) - .5) / length(env_names)
+# 行（遺伝子）の中心 y 座標（上が 1、下が 0）
+row_pos <- 1 - (seq_along(gene_ids) - .5) / length(gene_ids)
+
+
+symbols <- filter(symbol_to_geneid, is.element(gene_id, gene_ids))$Symbol
+final_plot_ <- ggdraw(big_plot) +
+  theme(plot.margin = margin(t = 5, r = 5, b = 5, l = 5, unit = "mm"))　+
+  ## 列ラベル（環境）
+  pmap(list(col_pos, env_names),
+       ~draw_text(..2, x = ..1, y = 1, size = 7,
+                  hjust = 0.5, vjust = 0)) +
+  ## 行ラベル（遺伝子）
+  pmap(list(row_pos, symbols),
+       ~draw_text(..2, x = 0.00, y = ..1, angle = 90, size = 7,
+                  hjust = 0.5, vjust = 0.5)) 
+
+final_plot_
+```
+
+#### 3. Investigate the correlation distribution
+
+```{r coe}
+# correlation
+SRimp.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], signal_importance$SR)})
+WTimp.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], signal_importance$WT)})
+GSIimp.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], signal_importance$GSI)})
+SR.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], EnvData$SR)})
+WT.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], EnvData$WT)})
+GSI.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], GSIData$Female_mean)})
+dGSI.hormone.coef <- sapply(sex_hormone_genes$gene_id, function(name){cor(medaka_2y_RNAseq_ave_norm[name,], GSIData$deltaFemaleGSI)})
+
+fsg_hist_df <- tibble(
+  W_SR =  SRimp.hormone.coef,
+  W_WT =  WTimp.hormone.coef,
+  W_GSI = GSIimp.hormone.coef,
+  SR    =  SR.hormone.coef,
+  WT    =  WT.hormone.coef,
+  GSI   =  GSI.hormone.coef,
+  dGSI  =  dGSI.hormone.coef
+) %>% 
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "coef") 
+#%>% 
+#  mutate(variable = factor(variable, levels = c(
+#    "W_SR", "W_WT", "W_GSI", "SR","WT", "GSI", "dGSI"
+#  )))
+
+
+fsg_hist_plot <- 
+  ggplot(fsg_hist_df, aes(x = coef)) +
+  geom_histogram(fill = "grey", colour = "black") +
+  facet_wrap(~ variable, ncol = 7) +
+  scale_x_continuous(limits = c(-1, 1),
+                     breaks = seq(-1, 1, 1)) +
+  labs(x = "Pearson correlation coefficient",
+       y = "Count") +
+  theme_classic(base_size = 6) + theme(strip.text =element_blank()) 
+
+
+
+#+
+final_plot <- final_plot_ + 
+  pmap(list(rep(row_pos,each=length(col_pos))+0.01, 
+            rep(col_pos, times=length(row_pos))-0.04, paste("r",round(fsg_hist_df$coef,2), sep=": ")),
+       ~draw_text(..3, x = ..2, y = ..1,  size = 6,
+                  hjust = 0.5, vjust = 0.5)) 
+
+#final_plot 
+
+sex_env_comp_gg <- gridExtra::grid.arrange(
+  final_plot, fsg_hist_plot, nrow = 2, heights=c(5,0.7))
+
+#ggsave("FiguresV2/SexHormoneComp2.pdf", final_plot, width=7.08, height=6.69)
+```
+
+#### 4. statistical test
+
+```{r loadnullmodel}
+# laod null model
+data_dir = "./TV0603_alpha0win3noisemean"
+SRimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_SRimp.csv", sep="")), header=FALSE)
+WTimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_WTimp.csv", sep="")), header=FALSE)
+GSIimp.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_GSIimp.csv", sep="")), header=FALSE)
+
+SR.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_SR.csv", sep="")), header=FALSE)
+WT.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_WT.csv", sep="")), header=FALSE)
+GSI.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_GSI.csv", sep="")), header=FALSE)
+dGSI.randomized.coef_ <- read.csv(file.path(data_dir, paste("randomized_dGSI.csv", sep="")), header=FALSE)
+
+
+#Align the sample date
+sample_point <- format(as.Date(signal_importance_$Time_raw, format = "%Y-%m-%d %H:%M:%S"), "%y-%m/%d")
+
+SRimp.randomized.coef <- SRimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+WTimp.randomized.coef <- WTimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+GSIimp.randomized.coef <- GSIimp.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+SR.randomized.coef <- SR.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+WT.randomized.coef <- WT.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+GSI.randomized.coef <- GSI.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+dGSI.randomized.coef <- dGSI.randomized.coef_[,is.element(sample_point, colnames(medaka_2y_RNAseq_ave))]
+```
+
+```{r surroagate_test_for_sex_hormone_genes}
+
+SRimp_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = SRimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['SR']])
+)  %>% t() %>% as.data.frame()
+colnames(SRimp_sexhgene_statres) <- c("cor", "raw_pval")
+
+WTimp_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = WTimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['WT']])
+)  %>% t() %>% as.data.frame()
+colnames(WTimp_sexhgene_statres) <- c("cor", "raw_pval")
+
+GSIimp_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = GSIimp.randomized.coef,
+  realmodel_vec = as.numeric(signal_importance[['GSI']])
+)  %>% t() %>% as.data.frame()
+colnames(GSIimp_sexhgene_statres) <- c("cor", "raw_pval")
+
+SR_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = SR.randomized.coef,
+  realmodel_vec = as.numeric(EnvData$SR)
+)  %>% t() %>% as.data.frame()
+colnames(SR_sexhgene_statres) <- c("cor", "raw_pval")
+
+WT_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = WT.randomized.coef,
+  realmodel_vec = as.numeric(EnvData$WT)
+)  %>% t() %>% as.data.frame()
+colnames(WT_sexhgene_statres) <- c("cor", "raw_pval")
+
+GSI_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = GSI.randomized.coef,
+  realmodel_vec = as.numeric(GSIData$Female_mean)
+)  %>% t() %>% as.data.frame()
+colnames(GSI_sexhgene_statres) <- c("cor", "raw_pval")
+
+dGSI_sexhgene_statres <- pbapply::pbsapply(
+  sex_hormone_genes$gene_id,
+  surrogate_test,
+  nullmodel_mat = dGSI.randomized.coef,
+  realmodel_vec = as.numeric(GSIData$deltaFemaleGSI)
+)  %>% t() %>% as.data.frame()
+colnames(dGSI_sexhgene_statres) <- c("cor", "raw_pval")
+  
+
+# result summary
+df_list <- list(
+  W_SR  = SRimp_sexhgene_statres,
+  W_WT  = WTimp_sexhgene_statres,
+  W_GSI = GSIimp_sexhgene_statres,
+  SR     = SR_sexhgene_statres,
+  WT     = WT_sexhgene_statres,
+  GSI    = GSI_sexhgene_statres,
+  dGSI   = dGSI_sexhgene_statres
+)
+imap_dfr(df_list, ~{
+  .x %>%                                   # 各データフレーム
+    mutate(bonfp = p.adjust(raw_pval,
+                            method = "bonferroni")) %>%
+    summarise(
+      dataset = .y,  
+      semi_significant = sum(raw_pval < 0.05),# リスト名を保持
+      signigicant   = sum(bonfp < 0.1)           # 有意行数
+    )
+}) %>% gt()
+
+```
+
+#### 4. detail plot
+
+```{r detail}
+
+SR_sexhgene_statres %>% mutate(bonfp = p.adjust(raw_pval, method = "fdr"))
+SRimp_sexhgene_statres  %>% mutate(bonfp = p.adjust(raw_pval, method = "fdr"))
+
+GSIimp.signif.geneids <- GSIimp_sexhgene_statres %>%  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni")) %>% filter(bonfp < 0.1) %>% rownames()
+
+WT.signif.geneids <- WT_sexhgene_statres %>%  mutate(bonfp = p.adjust(raw_pval, method = "bonferroni")) %>% filter(bonfp < 0.1) %>% rownames()
+
+symbol_to_geneid %>% filter(is.element(gene_id, GSIimp.signif.geneids)) %>% print()
+symbol_to_geneid %>% filter(is.element(gene_id, WT.signif.geneids)) %>% print()
+```
+
+### 

@@ -1,0 +1,13 @@
+Package: org.Olatipes.eg.db
+Title: Genome wide annotation for Oryzias latipes
+Description: Genome wide annotation for Oryzias latipes, primarily based on mapping using Entrez Gene identifiers.
+Version: 0.2
+Author: Medaka-Samurai <so@someplace.org>
+Maintainer: Medaka-Ninja <so@someplace.org>
+Depends: R (>= 2.7.0), methods, AnnotationDbi (>= 1.66.0)
+Suggests: DBI, annotate, RUnit
+License: Artistic-2.0
+organism: Oryzias latipes
+species: Oryzias latipes
+biocViews: OrgDb, annotation
+

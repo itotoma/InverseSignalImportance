@@ -1,0 +1,16 @@
+import(methods)
+import(AnnotationDbi)
+
+### Only put what is statically exported here. All the AnnObj instances
+### created at load time are dynamically exported (refer to R/zzz.R for
+### the details).
+export(
+    org.Olatipes.eg,
+    org.Olatipes.eg_dbconn,
+    org.Olatipes.eg_dbfile,
+    org.Olatipes.eg_dbschema,
+    org.Olatipes.eg_dbInfo,
+
+    org.Olatipes.egORGANISM
+)
+
