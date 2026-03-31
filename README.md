@@ -86,7 +86,7 @@ em = ISI.EMAlgorithm(
     alpha=0.0
 )
 
-x_smooth, P_smooth, coef, rss, rss_history = em.fit(
+signal_importance, P_smooth, response_func, rss, rss_history = em.fit(
     X_list=[X1, X2],   # Sliding-window input matrices (one per replicate group)
     Y_list=[Y1, Y2],   # Observed dGSI time series
     times=time_array,
@@ -96,8 +96,8 @@ x_smooth, P_smooth, coef, rss, rss_history = em.fit(
 rss_test, predictions = em.test(
     X_list=[X3],
     Y_list=[Y3],
-    x_smooth=x_smooth,
-    coef=coef
+    x_smooth=signal_importance,
+    coef=response_func
 )
 ```
 
